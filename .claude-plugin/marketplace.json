@@ -1,0 +1,16 @@
+{
+	"name": "agent-grid",
+	"owner": {
+		"name": "v1ol3tr0se"
+	},
+	"metadata": {
+		"description": "A live grid above the prompt of the session's subagents, workflow agents and background shells: each box shows its thinking, tool calls, command output, busiest process and the files it reads or writes."
+	},
+	"plugins": [
+		{
+			"name": "agent-grid",
+			"source": "./",
+			"description": "A live grid above the prompt of the session's subagents, workflow agents and background shells: each box shows its thinking, tool calls, command output, busiest process and the files it reads or writes."
+		}
+	]
+}
