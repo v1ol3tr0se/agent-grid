@@ -2,3 +2,13 @@ node_modules/
 .claude-plugin/types/
 *.bak-*
 *~
+
+*.log
+.env*
+*.bak*
+*.orig
+*.rej
+*.swp
+.directory
+package-lock.json
+pnpm-lock.yaml
