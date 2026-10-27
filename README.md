@@ -13,7 +13,7 @@ made with claude code, for claude code.
 ### before you start
 - claude code 2.1.295 or newer
 - linux
-- python 3.7+
+- node 22.18+
 
 on macos it still works but you won't get the processes, files or command output, that stuff comes from `/proc` and macos doesn't have one. not much i can do there
 

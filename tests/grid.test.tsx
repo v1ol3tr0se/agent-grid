@@ -1660,7 +1660,7 @@ test("every box says what is happening as it happens: the model thinking and wri
 	} as any);
 	await clock.advance(1000);
 	await clock.advance(1000);
-	expect(spawned).toEqual([["python3", expect.stringMatching(/\/hooks\/activity\.py$/)]]);
+	expect(spawned).toEqual([["node", expect.stringMatching(/\/hooks\/activity\.ts$/)]]);
 	let drawn = await texts();
 	expect(drawn).toContain("search the binary");
 	expect(drawn).toContain("$ python3 - <<'EOF'");

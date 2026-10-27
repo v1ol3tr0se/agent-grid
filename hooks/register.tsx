@@ -695,7 +695,7 @@ async function runProbe($: any) {
 	let isDone = false;
 	let buf = "";
 	try {
-		const child = $.process.spawn({ argv: ["python3", `${$.plugin.root}/hooks/activity.py`] });
+		const child = $.process.spawn({ argv: ["node", `${$.plugin.root}/hooks/activity.ts`] });
 		for await (const piece of child) {
 			if (piece.stream !== "stdout") continue;
 			buf += piece.text;
