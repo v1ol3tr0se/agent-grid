@@ -3,24 +3,32 @@ name: ci
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
-jobs:
-  biome:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - run: npx --yes @biomejs/biome@2.6.3 ci .
+permissions:
+  contents: read
 
-  probe:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         node: ["22.18", "24", "26"]
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-      - run: node --test tests/probe.ts
+          cache: yarn
+
+      - run: yarn install --frozen-lockfile --non-interactive
+      - run: yarn verify

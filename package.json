@@ -1,0 +1,24 @@
+{
+	"name": "agent-grid",
+	"version": "0.2.0",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=22.18"
+	},
+	"scripts": {
+		"lint": "biome check .",
+		"format": "biome check --write .",
+		"typecheck": "tsc -p tsconfig.node.json && yarn typecheck:kit",
+		"typecheck:kit": "[ -n \"$CI\" ] || tsc -p tsconfig.json",
+		"test": "node --test tests/probe.ts && yarn test:kit",
+		"test:kit": "[ -n \"$CI\" ] || claude plugin test .",
+		"verify": "yarn lint && yarn typecheck && yarn test"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.6.3",
+		"@types/node": "^26.6.5",
+		"typescript": "^7.0.2"
+	},
+	"packageManager": "yarn@1.22.22"
+}

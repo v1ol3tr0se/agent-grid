@@ -1,1 +1,4 @@
-{ "extends": "./.claude-plugin/types/tsconfig.json" }
+{
+	"extends": "./.claude-plugin/types/tsconfig.json",
+	"exclude": ["hooks/activity.ts", "tests/probe.ts"]
+}
