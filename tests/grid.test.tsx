@@ -38,52 +38,71 @@ const BAND = {
 	viewport: { columns: 104, rows: 59, isFullscreen: true },
 };
 
+const ran = (stdout = "") => ({
+	value: { exitCode: 0, stdout, stderr: "", isStdoutTruncated: false, isStderrTruncated: false },
+});
+const ok = () => ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" });
+const launched = (n: string, workflowName: string, transcriptDir: string) => ({
+	result: { status: "async_launched", taskId: `w${n}`, runId: `wf_${n}`, workflowName, transcriptDir },
+	text: "launched",
+});
+const journalAt = (dir: string, journal: () => string, files: () => object[] = () => []) => ({
+	"fs.list": ($e: any, e: any) => ({
+		value:
+			e.path === dir
+				? [{ name: "journal.jsonl", kind: "file", size: journal().length, mtimeMs: 0, isLink: false }, ...files()]
+				: [],
+	}),
+	"process.run": ($e: any, e: any) => ran(e.argv?.[0] === "cut" ? journal() : ""),
+});
+const answer = (
+	on: any,
+	own: Record<string, (...args: any[]) => any> = {},
+	env: Record<string, string> = { HOME: "/home/t" },
+) => {
+	mock.env(on, env);
+	const base: Record<string, (...args: any[]) => any> = {
+		"process.spawn": noProbe,
+		"session.start": ($e: any, e: any) => ({ cwd: e.cwd }),
+		"command.register": () => ({ value: undefined }),
+		"agent.spawn": ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }),
+		"tool.call": ok,
+		"turn.complete": ($e: any, e: any) => ({ text: e.answer }),
+		"prompt.submit": ($e: any, e: any) => ({ text: e.text }),
+		"fs.list": () => ({ value: [] }),
+		"process.run": () => ran(),
+		"ui.panes": () => ({ value: [] }),
+		"ui.focus": () => ({}),
+		"ui.scroll": () => ({}),
+		"ui.close": () => ({ value: undefined }),
+		"ui.render": () => ({ type: "engine", ref: 0 }),
+	};
+	for (const [noun, hook] of Object.entries({ ...base, ...own })) on(noun, hook);
+};
+const textsIn = async (view: any) =>
+	[
+		...(await view.findAll({ type: "Text" })).map((t: any) => t.text),
+		...(await view.findAll({ type: "Button" })).map((b: any) => String(b.props.label)),
+	].join("\n");
+
 test("a subagent, a background shell and a workflow run each get a live box in the view", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("agent.spawn", () => ({ model: "claude-haiku-4-5-20251001", agentId: "a1" }));
-	on("tool.call", ($e: any, e: any) =>
-		e.tool === "Workflow"
-			? ({
-					result: {
-						status: "async_launched",
-						taskId: "w1",
-						runId: "wf_1",
-						workflowName: "review",
-						transcriptDir: "/nonexistent/wf_1",
-					},
-					text: "launched",
-				} as any)
-			: e.run_in_background
-				? ({
-						result: { backgroundTaskId: `b-${e.description}`, stdout: "", stderr: "", interrupted: false },
-						text: "Output is being written to: /nonexistent/tasks/b.output.",
-					} as any)
-				: ({
-						result: { stdout: "Compiled in 19.5s", stderr: "", interrupted: false },
-						text: "Compiled in 19.5s",
-					} as any),
-	);
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, {
+		"agent.spawn": () => ({ model: "claude-haiku-4-5-20251001", agentId: "a1" }),
+		"tool.call": ($e: any, e: any) =>
+			e.tool === "Workflow"
+				? launched("1", "review", "/nonexistent/wf_1")
+				: e.run_in_background
+					? {
+							result: { backgroundTaskId: `b-${e.description}`, stdout: "", stderr: "", interrupted: false },
+							text: "Output is being written to: /nonexistent/tasks/b.output.",
+						}
+					: { result: { stdout: "Compiled in 19.5s", stderr: "", interrupted: false }, text: "Compiled in 19.5s" },
+	});
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	let view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 
 	await $.agent.spawn({
 		description: "build the app",
@@ -148,7 +167,6 @@ test("a subagent, a background shell and a workflow run each get a live box in t
 });
 
 test("each agent of a workflow run gets its own live box, kept across a retry", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on, { now: 1_000_000 });
 	const DIR = "/runs/wf_9";
 	const KEY_A = `v2:${"a".repeat(64)}`;
@@ -157,83 +175,43 @@ test("each agent of a workflow run gets its own live box, kept across a retry", 
 		`${JSON.stringify({ type: "started", key, agentId, label, phase: "Lenses" })}\n`;
 	let journal = '{"type":"launched"}\n';
 	const files: Record<string, number> = {};
-	on(
-		"agent.spawn",
-		($e: any, e: any) =>
-			({ model: "claude-haiku-4-5-20251001", agentId: e.description === "lens:alpha" ? "aA1" : "aB1" }) as any,
-	);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on(
-		"fs.list",
-		($e: any, e: any) =>
-			({
-				value:
-					e.path === DIR
-						? [
-								{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false },
-								...Object.entries(files).map(([name, mtimeMs]) => ({
-									name,
-									kind: "file",
-									size: 100,
-									mtimeMs,
-									isLink: false,
-								})),
-							]
-						: [],
-			}) as any,
-	);
-	on(
-		"process.run",
-		($e: any, e: any) =>
-			({
-				value: {
-					exitCode: 0,
-					stdout: e.argv?.[0] === "cut" ? journal : "",
-					stderr: "",
-					isStdoutTruncated: false,
-					isStderrTruncated: false,
+	answer(on, {
+		...journalAt(
+			DIR,
+			() => journal,
+			() => Object.entries(files).map(([name, mtimeMs]) => ({ name, kind: "file", size: 100, mtimeMs, isLink: false })),
+		),
+		"agent.spawn": ($e: any, e: any) => ({
+			model: "claude-haiku-4-5-20251001",
+			agentId: e.description === "lens:alpha" ? "aA1" : "aB1",
+		}),
+		"tool.call": ($e: any, e: any) =>
+			e.tool === "Workflow"
+				? launched("9", "review", DIR)
+				: e.tool === "Read"
+					? { result: {}, text: "1\tone\n2\ttwo" }
+					: ok(),
+		"turn.step": async function* ($e: any, e: any) {
+			return {
+				turnId: e.turnId,
+				index: e.index,
+				answer: "",
+				toolUses: [],
+				stopReason: "tool_use",
+				usage: {
+					input_tokens: 10,
+					cache_read_input_tokens: 20000,
+					cache_creation_input_tokens: 0,
+					output_tokens: 90,
+					model: e.model,
 				},
-			}) as any,
-	);
-	on("tool.call", ($e: any, e: any) =>
-		e.tool === "Workflow"
-			? ({
-					result: { status: "async_launched", taskId: "w9", runId: "wf_9", workflowName: "review", transcriptDir: DIR },
-					text: "launched",
-				} as any)
-			: e.tool === "Read"
-				? ({ result: {}, text: "1\tone\n2\ttwo" } as any)
-				: ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" } as any),
-	);
-	on("turn.step", async function* ($e: any, e: any) {
-		return {
-			turnId: e.turnId,
-			index: e.index,
-			answer: "",
-			toolUses: [],
-			stopReason: "tool_use",
-			usage: {
-				input_tokens: 10,
-				cache_read_input_tokens: 20000,
-				cache_creation_input_tokens: 0,
-				output_tokens: 90,
-				model: e.model,
-			},
-		} as any;
+			};
+		},
 	});
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 
 	await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 	for (const [label, agentIndex] of [
@@ -316,41 +294,30 @@ test("each agent of a workflow run gets its own live box, kept across a retry", 
 });
 
 test("the grid shows itself in the band while anything is in it, steps aside while you type, and /workflow closes or pins", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
 	const closed: any[] = [];
 	const panes: any[] = [];
 	let draft = "";
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }) as any);
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
 	const order: string[] = [];
-	on("prompt.read", () => {
-		order.push("read draft");
-		return { value: { text: draft } } as any;
-	});
-	on("state.set", ($e: any, e: any, next: any) => {
-		if (e.key === "cards") order.push("write cards");
-		return next(e);
-	});
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: panes.map((p) => ({ ...p })) }) as any);
-	on("ui.close", ($e: any, e: any) => {
-		closed.push(e);
-		panes.splice(0, panes.length);
-		return { value: undefined } as any;
-	});
-	on("ui.render", ($e: any, e: any) => {
-		const { Text } = $e.ui.resolve(e);
-		return <Text>engine band</Text>;
+	answer(on, {
+		"prompt.read": () => {
+			order.push("read draft");
+			return { value: { text: draft } };
+		},
+		"state.set": ($e: any, e: any, next: any) => {
+			if (e.key === "cards") order.push("write cards");
+			return next(e);
+		},
+		"ui.panes": () => ({ value: panes.map((p) => ({ ...p })) }),
+		"ui.close": ($e: any, e: any) => {
+			closed.push(e);
+			panes.splice(0, panes.length);
+			return { value: undefined };
+		},
+		"ui.render": ($e: any, e: any) => {
+			const { Text } = $e.ui.resolve(e);
+			return <Text>engine band</Text>;
+		},
 	});
 
 	panes.push({ id: "grid", title: "Agents", isShown: true, isFocused: true, isPlaced: true });
@@ -365,10 +332,7 @@ test("the grid shows itself in the band while anything is in it, steps aside whi
 		} as any);
 	const band = async (props: object = {}) => {
 		const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, ...props } });
-		const text = [
-			...(await ui.findAll({ type: "Text" })).map((t) => t.text),
-			...(await ui.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+		const text = await textsIn(ui);
 		await ui.unmount();
 		return text;
 	};
@@ -477,7 +441,6 @@ test(
 	"a running run keeps every box through a prompt, a retry reuses its box (one 45 s later gets one again), a resumed key runs again, and time left stays honest",
 	{ timeoutMs: 20_000 },
 	async ($, on) => {
-		on("process.spawn", noProbe);
 		const clock = mock.clock(on, { now: 2_000_000 });
 		const DIR = "/runs/wf_7";
 		const KEY_A = `v2:${"c".repeat(64)}`;
@@ -485,69 +448,24 @@ test(
 		const row = (o: object) => `${JSON.stringify(o)}\n`;
 		let journal = row({ type: "launched" });
 		const state: Record<string, unknown> = {};
-		on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-		on("command.register", () => ({ value: undefined }) as any);
-		on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
-		on("prompt.read", () => ({ value: { text: "" } }) as any);
-		on("env.get", () => ({ value: "/home/t" }) as any);
-		on(
-			"fs.list",
-			($e: any, e: any) =>
-				({
-					value:
-						e.path === DIR
-							? [{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false }]
-							: [],
-				}) as any,
-		);
-		on(
-			"process.run",
-			($e: any, e: any) =>
-				({
-					value: {
-						exitCode: 0,
-						stdout: e.argv?.[0] === "cut" ? journal : "",
-						stderr: "",
-						isStdoutTruncated: false,
-						isStderrTruncated: false,
-					},
-				}) as any,
-		);
-		on("state.set", ($e: any, e: any, next: any) => {
-			state[`${e.plugin}.${e.key}`] = e.value;
-			return next(e);
-		});
 		let opens = 0;
-		on("ui.open", () => {
-			opens++;
-			return { value: { isPlaced: true } } as any;
+		answer(on, {
+			...journalAt(DIR, () => journal),
+			"prompt.read": () => ({ value: { text: "" } }),
+			"state.set": ($e: any, e: any, next: any) => {
+				state[`${e.plugin}.${e.key}`] = e.value;
+				return next(e);
+			},
+			"ui.open": () => {
+				opens++;
+				return { value: { isPlaced: true } };
+			},
+			"tool.call": ($e: any, e: any) => (e.tool === "Workflow" ? launched("7", "audit", DIR) : ok()),
 		});
-		on("ui.panes", () => ({ value: [] }) as any);
-		on("ui.close", () => ({ value: undefined }) as any);
-		on("tool.call", ($e: any, e: any) =>
-			e.tool === "Workflow"
-				? ({
-						result: {
-							status: "async_launched",
-							taskId: "w7",
-							runId: "wf_7",
-							workflowName: "audit",
-							transcriptDir: DIR,
-						},
-						text: "launched",
-					} as any)
-				: ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" } as any),
-		);
-		on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-		on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 		await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 		let view = await $.ui.mount(BAND);
-		const texts = async () =>
-			[
-				...(await view.findAll({ type: "Text" })).map((t) => t.text),
-				...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-			].join("\n");
+		const texts = () => textsIn(view);
 
 		await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 		journal += row({ type: "started", key: KEY_A, agentId: "aA1", label: "scan:alpha", phase: "Scan" });
@@ -621,7 +539,6 @@ test(
 );
 
 test("each frame wears its own color, the one its Clawd wears: no two boxes share one; red when it failed", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
 	const MODEL: Record<string, string> = {
 		op: "claude-opus-5-5",
@@ -631,20 +548,7 @@ test("each frame wears its own color, the one its Clawd wears: no two boxes shar
 		no: "mystery-model-1",
 		ne: "claude-haiku-4-5-20251001",
 	};
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: MODEL[e.description], agentId: e.description }) as any);
-	on("tool.call", () => ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" }) as any);
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, { "agent.spawn": ($e: any, e: any) => ({ model: MODEL[e.description], agentId: e.description }) });
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	for (const id of ["op", "so", "ha", "fa", "no"])
 		await $.agent.spawn({ description: id, subagentType: "general-purpose", prompt: id, background: true } as any);
@@ -679,26 +583,13 @@ test("each frame wears its own color, the one its Clawd wears: no two boxes shar
 });
 
 test("the arrows walk the boxes: each title is a stop, the first takes the ring, the chosen box keeps the ring and is scrolled into view", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on(
-		"agent.spawn",
-		($e: any, e: any) =>
-			({ model: "claude-haiku-4-5-20251001", agentId: e.description === "one" ? "a1" : "a2" }) as any,
-	);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, {
+		"agent.spawn": ($e: any, e: any) => ({
+			model: "claude-haiku-4-5-20251001",
+			agentId: e.description === "one" ? "a1" : "a2",
+		}),
+	});
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	await $.agent.spawn({ description: "one", subagentType: "general-purpose", prompt: "x", background: true } as any);
@@ -738,28 +629,14 @@ test("the arrows walk the boxes: each title is a stop, the first takes the ring,
 });
 
 test("↑ ↓ go to the box above or below, ← → to the one beside; a redraw that moves the chosen box keeps it chosen", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
 	const engineScrolls: any[] = [];
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }) as any);
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", ($e: any, e: any) => {
-		engineScrolls.push(e);
-		return {} as any;
+	answer(on, {
+		"ui.scroll": ($e: any, e: any) => {
+			engineScrolls.push(e);
+			return {};
+		},
 	});
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	for (const id of ["a1", "a2", "a3", "a4", "a5"])
@@ -858,22 +735,8 @@ test("↑ ↓ go to the box above or below, ← → to the one beside; a redraw 
 });
 
 test("Home and End go to the first and last row, ↓ one row, with the numbers the band sends", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	for (const id of ["a1", "a2", "a3", "a4", "a5"])
@@ -918,64 +781,25 @@ test("Home and End go to the first and last row, ↓ one row, with the numbers t
 });
 
 test("an opened box that leaves the drawing puts the view back on the grid", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on, { now: 4_000_000 });
 	const DIR = "/runs/wf_9";
 	const row = (o: object) => `${JSON.stringify(o)}\n`;
 	let journal = row({ type: "launched" });
 	const state: Record<string, unknown> = {};
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on(
-		"fs.list",
-		($e: any, e: any) =>
-			({
-				value:
-					e.path === DIR
-						? [{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false }]
-						: [],
-			}) as any,
-	);
-	on(
-		"process.run",
-		($e: any, e: any) =>
-			({
-				value: {
-					exitCode: 0,
-					stdout: e.argv?.[0] === "cut" ? journal : "",
-					stderr: "",
-					isStdoutTruncated: false,
-					isStderrTruncated: false,
-				},
-			}) as any,
-	);
-	on(
-		"tool.call",
-		() =>
-			({
-				result: { status: "async_launched", taskId: "w9", runId: "wf_9", workflowName: "sweep", transcriptDir: DIR },
-				text: "launched",
-			}) as any,
-	);
-	on("state.set", ($e: any, e: any, next: any) => {
-		state[`${e.plugin}.${e.key}`] = e.value;
-		return next(e);
+	answer(on, {
+		...journalAt(DIR, () => journal),
+		"tool.call": () => launched("9", "sweep", DIR),
+		"state.set": ($e: any, e: any, next: any) => {
+			state[`${e.plugin}.${e.key}`] = e.value;
+			return next(e);
+		},
 	});
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 	await clock.advance(300);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	await view.press({ key: "box:wf:wf_9" });
 	await clock.advance(10);
 	expect((await view.findAll({ type: "Button" })).map((b) => b.props.key)).toEqual(["open:wf:wf_9"]);
@@ -990,36 +814,22 @@ test("an opened box that leaves the drawing puts the view back on the grid", asy
 });
 
 test("Enter opens a box to the whole view: all its rows, scrolled by the arrows and the wheel; Enter goes back to the grid", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
 	const engineScrolls: any[] = [];
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on(
-		"agent.spawn",
-		($e: any, e: any) =>
-			({ model: "claude-haiku-4-5-20251001", agentId: e.description === "one" ? "a1" : "a2" }) as any,
-	);
-	on(
-		"tool.call",
-		($e: any, e: any) =>
-			({ result: { stdout: `out ${e.command}`, stderr: "", interrupted: false }, text: `out ${e.command}` }) as any,
-	);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", ($e: any, e: any) => {
-		engineScrolls.push(e);
-		return {} as any;
+	answer(on, {
+		"agent.spawn": ($e: any, e: any) => ({
+			model: "claude-haiku-4-5-20251001",
+			agentId: e.description === "one" ? "a1" : "a2",
+		}),
+		"tool.call": ($e: any, e: any) => ({
+			result: { stdout: `out ${e.command}`, stderr: "", interrupted: false },
+			text: `out ${e.command}`,
+		}),
+		"ui.scroll": ($e: any, e: any) => {
+			engineScrolls.push(e);
+			return {};
+		},
 	});
-	on("ui.close", () => ({ value: undefined }) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	await $.agent.spawn({ description: "one", subagentType: "general-purpose", prompt: "x", background: true } as any);
@@ -1027,11 +837,7 @@ test("Enter opens a box to the whole view: all its rows, scrolled by the arrows 
 	for (let i = 1; i <= 20; i++) await $.tool.call({ tool: "Bash", command: `step ${i}`, agentId: "a1" } as any);
 	await clock.advance(300);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	expect((await view.findAll({ type: "Button" })).map((b) => b.props.key)).toEqual(["box:a1", "box:a2"]);
 	expect((await view.findAll({ type: "Box" })).filter((b) => b.props.borderStyle).map((b) => b.props.height)).toEqual([
 		15, 15,
@@ -1099,7 +905,6 @@ test("Enter opens a box to the whole view: all its rows, scrolled by the arrows 
 });
 
 test("a run still going shows every agent, finished ones too, their rows read back from the agent transcripts; one long finished stays closed", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on, { now: 3_000_000 });
 	const DIR = "/runs/wf_5";
 	const row = (o: object) => `${JSON.stringify(o)}\n`;
@@ -1129,57 +934,35 @@ test("a run still going shows every agent, finished ones too, their rows read ba
 			type: "assistant",
 			message: { model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Two servers found." }] },
 		});
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on(
-		"fs.list",
-		($e: any, e: any) =>
-			({
-				value:
-					e.path === DIR
-						? [
-								{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false },
-								{ name: "agent-aD1.jsonl", kind: "file", size: transcript.length, mtimeMs: 2_900_000, isLink: false },
-								{ name: "agent-aE1.jsonl", kind: "file", size: transcript.length, mtimeMs: 2_999_000, isLink: false },
-							]
-						: [],
-			}) as any,
-	);
 	const tailed: string[] = [];
-	on("process.run", ($e: any, e: any) => {
-		if (e.argv?.[0] === "tail") tailed.push(String(e.argv.at(-1)));
-		const out =
-			e.argv?.[0] === "cut"
-				? journal
-				: e.argv?.[0] === "tail" && String(e.argv.at(-1)).endsWith("agent-aE1.jsonl")
-					? transcript
-					: "";
-		return {
-			value: { exitCode: 0, stdout: out, stderr: "", isStdoutTruncated: false, isStderrTruncated: false },
-		} as any;
+	answer(on, {
+		...journalAt(
+			DIR,
+			() => journal,
+			() => [
+				{ name: "agent-aD1.jsonl", kind: "file", size: transcript.length, mtimeMs: 2_900_000, isLink: false },
+				{ name: "agent-aE1.jsonl", kind: "file", size: transcript.length, mtimeMs: 2_999_000, isLink: false },
+			],
+		),
+		"process.run": ($e: any, e: any) => {
+			if (e.argv?.[0] === "tail") tailed.push(String(e.argv.at(-1)));
+			return ran(
+				e.argv?.[0] === "cut"
+					? journal
+					: e.argv?.[0] === "tail" && String(e.argv.at(-1)).endsWith("agent-aE1.jsonl")
+						? transcript
+						: "",
+			);
+		},
+		"tool.call": () => launched("5", "audit", DIR),
 	});
-	on(
-		"tool.call",
-		($e: any, e: any) =>
-			({
-				result: { status: "async_launched", taskId: "w5", runId: "wf_5", workflowName: "audit", transcriptDir: DIR },
-				text: "launched",
-			}) as any,
-	);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 	await clock.advance(1000);
 	await clock.advance(300);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	let drawn = await texts();
 	expect(tally(drawn)).toContain("1 running · 1 done");
 	expect(drawn).toContain("check:early");
@@ -1199,24 +982,8 @@ test("a run still going shows every agent, finished ones too, their rows read ba
 });
 
 test("a grid taller than the band pages whole rows itself, under a row of its own: ↑ N more, what it holds in the middle, ↓ N more", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }) as any);
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("prompt.submit", ($e: any, e: any) => ({ text: e.text }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const ids = Array.from({ length: 20 }, (_, i) => `a${String(i + 1).padStart(2, "0")}`);
@@ -1333,37 +1100,17 @@ test("a grid taller than the band pages whole rows itself, under a row of its ow
 });
 
 test("all of them in sight, a wide band too: the tally row under the boxes still says what the grid holds", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-opus-5-5", agentId: e.description }) as any);
-	on("tool.call", ($e: any, e: any) =>
-		e.tool === "Workflow"
-			? ({
-					result: {
-						status: "async_launched",
-						taskId: "w1",
-						runId: "wf_1",
-						workflowName: "sweep",
-						transcriptDir: "/nonexistent/wf_1",
+	answer(on, {
+		"agent.spawn": ($e: any, e: any) => ({ model: "claude-opus-5-5", agentId: e.description }),
+		"tool.call": ($e: any, e: any) =>
+			e.tool === "Workflow"
+				? launched("1", "sweep", "/nonexistent/wf_1")
+				: {
+						result: { backgroundTaskId: `b-${e.description}`, stdout: "", stderr: "", interrupted: false },
+						text: "Output is being written to: /nonexistent/tasks/b.output.",
 					},
-					text: "launched",
-				} as any)
-			: ({
-					result: { backgroundTaskId: `b-${e.description}`, stdout: "", stderr: "", interrupted: false },
-					text: "Output is being written to: /nonexistent/tasks/b.output.",
-				} as any),
-	);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	});
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	for (const id of ["c1", "c2", "c3", "c4", "c5"])
@@ -1390,25 +1137,9 @@ test("all of them in sight, a wide band too: the tally row under the boxes still
 });
 
 test("busy boxes in a 99-column, 17-row band page two rows at a time, and the band comes back on the first page", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
 	let draft = "";
-	on("prompt.read", () => ({ value: { text: draft } }) as any);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }) as any);
-	on("tool.call", () => ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, { "prompt.read": () => ({ value: { text: draft } }) });
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const ids = Array.from({ length: 10 }, (_, i) => `b${String(i + 1).padStart(2, "0")}`);
@@ -1467,23 +1198,8 @@ test("busy boxes in a 99-column, 17-row band page two rows at a time, and the ba
 });
 
 test("a band too short for the tally row and a box gives the box all of it; one row taller, the tally row is back", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on);
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }) as any);
-	on("tool.call", () => ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.panes", () => ({ value: [] }) as any);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	await $.agent.spawn({ description: "d1", subagentType: "general-purpose", prompt: "x", background: true } as any);
@@ -1583,72 +1299,57 @@ test("every box says what is happening as it happens: the model thinking and wri
 		],
 	};
 	let wake = () => {};
-	on("process.spawn", async function* ($e: any, e: any) {
-		spawned.push([...e.argv]);
-		for (;;) {
-			yield { stream: "stdout", text: `${JSON.stringify(looks)}\n` };
-			await new Promise<void>((resolve) => {
-				wake = resolve;
-			});
-		}
-	} as any);
 	const lookAgain = async () => {
 		wake();
 		await clock.advance(300);
 	};
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on(
-		"agent.spawn",
-		($e: any, e: any) =>
-			({ model: "claude-sonnet-4-5", agentId: e.description === "fix the build" ? "a1" : "a2" }) as any,
-	);
-	on("tool.call", async ($e: any, e: any) => {
-		if (e.run_in_background)
+	answer(on, {
+		"process.spawn": async function* ($e: any, e: any) {
+			spawned.push([...e.argv]);
+			for (;;) {
+				yield { stream: "stdout", text: `${JSON.stringify(looks)}\n` };
+				await new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+			}
+		},
+		"agent.spawn": ($e: any, e: any) => ({
+			model: "claude-sonnet-4-5",
+			agentId: e.description === "fix the build" ? "a1" : "a2",
+		}),
+		"tool.call": async ($e: any, e: any) => {
+			if (e.run_in_background)
+				return {
+					result: { backgroundTaskId: "bt1", stdout: "", stderr: "", interrupted: false },
+					text: "Output is being written to: /nonexistent/tasks/bt1.output.",
+				};
+			if (e.command === "cargo build") await built;
+			if (e.tool === "Edit")
+				return {
+					result: { structuredPatch: [{ lines: [" a = 1", "-c = 3", "+c = 3", "+d = 4"] }] },
+					text: "The file has been updated successfully.",
+				};
 			return {
-				result: { backgroundTaskId: "bt1", stdout: "", stderr: "", interrupted: false },
-				text: "Output is being written to: /nonexistent/tasks/bt1.output.",
-			} as any;
-		if (e.command === "cargo build") await built;
-		if (e.tool === "Edit")
-			return {
-				result: { structuredPatch: [{ lines: [" a = 1", "-c = 3", "+c = 3", "+d = 4"] }] },
-				text: "The file has been updated successfully.",
-			} as any;
-		return {
-			result: { stdout: "ok", stderr: "", interrupted: false },
-			text: e.tool === "Write" ? "File created successfully at: /home/t/app/conf.toml" : "ok",
-		} as any;
+				result: { stdout: "ok", stderr: "", interrupted: false },
+				text: e.tool === "Write" ? "File created successfully at: /home/t/app/conf.toml" : "ok",
+			};
+		},
+		"turn.step": async function* ($e: any, e: any) {
+			yield { kind: "thinking", index: 0, text: "The build is slow.\nChecking the config" };
+			yield { kind: "text", index: 1, text: "Writing the " };
+			yield { kind: "text", index: 1, text: "config now" };
+			yield { kind: "tool", index: 2, id: "tu1", name: "Write" };
+			yield { kind: "input", index: 2, json: '{"file_path":"/home/t/app/con' };
+			yield { kind: "input", index: 2, json: 'f.toml","content":"a = \\"x\\\\n\\"\\nb = 2\\' };
+			yield { kind: "input", index: 2, json: "nc" };
+			yield { kind: "stop", stopReason: "tool_use", usage: null };
+			return { turnId: e.turnId, index: e.index, answer: "", toolUses: [], stopReason: "tool_use", usage: null };
+		},
 	});
-	on("turn.step", async function* ($e: any, e: any) {
-		yield { kind: "thinking", index: 0, text: "The build is slow.\nChecking the config" };
-		yield { kind: "text", index: 1, text: "Writing the " };
-		yield { kind: "text", index: 1, text: "config now" };
-		yield { kind: "tool", index: 2, id: "tu1", name: "Write" };
-		yield { kind: "input", index: 2, json: '{"file_path":"/home/t/app/con' };
-		yield { kind: "input", index: 2, json: 'f.toml","content":"a = \\"x\\\\n\\"\\nb = 2\\' };
-		yield { kind: "input", index: 2, json: "nc" };
-		yield { kind: "stop", stopReason: "tool_use", usage: null };
-		return { turnId: e.turnId, index: e.index, answer: "", toolUses: [], stopReason: "tool_use", usage: null } as any;
-	} as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.focus", () => ({}) as any);
-	on("ui.scroll", () => ({}) as any);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	const heights = async () =>
 		(await view.findAll({ type: "Box" })).filter((b) => b.props.borderStyle).map((b) => b.props.height);
 
@@ -1786,7 +1487,6 @@ test("every box says what is happening as it happens: the model thinking and wri
 });
 
 test("a finished box closes as its Clawd leaves: 4 s after it ends, the others stay", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on, { now: 1_000_000 });
 	const DIR = "/runs/wf_7";
 	const KEY_A = `v2:${"e".repeat(64)}`;
@@ -1794,49 +1494,11 @@ test("a finished box closes as its Clawd leaves: 4 s after it ends, the others s
 	const started = (key: string, agentId: string, label: string) =>
 		`${JSON.stringify({ type: "started", key, agentId, label, phase: "Lenses" })}\n`;
 	let journal = '{"type":"launched"}\n';
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on(
-		"fs.list",
-		($e: any, e: any) =>
-			({
-				value:
-					e.path === DIR
-						? [{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false }]
-						: [],
-			}) as any,
-	);
-	on(
-		"process.run",
-		($e: any, e: any) =>
-			({
-				value: {
-					exitCode: 0,
-					stdout: e.argv?.[0] === "cut" ? journal : "",
-					stderr: "",
-					isStdoutTruncated: false,
-					isStderrTruncated: false,
-				},
-			}) as any,
-	);
-	on(
-		"tool.call",
-		() =>
-			({
-				result: { status: "async_launched", taskId: "w7", runId: "wf_7", workflowName: "sweep", transcriptDir: DIR },
-				text: "launched",
-			}) as any,
-	);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, { ...journalAt(DIR, () => journal), "tool.call": () => launched("7", "sweep", DIR) });
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 	journal += started(KEY_A, "aA1", "lens:alpha") + started(KEY_B, "aB1", "lens:beta");
 	await clock.advance(1000);
@@ -1853,29 +1515,12 @@ test("a finished box closes as its Clawd leaves: 4 s after it ends, the others s
 });
 
 test("a subagent that runs another turn after its box closed (a message resumed it, a teammate woke) gets its box back", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on, { now: 1_000_000 });
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("agent.spawn", () => ({ model: "claude-haiku-4-5-20251001", agentId: "a1" }) as any);
-	on("tool.call", () => ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" }) as any);
-	on("turn.complete", ($e: any, e: any) => ({ text: e.answer }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on("fs.list", () => ({ value: [] }) as any);
-	on(
-		"process.run",
-		() =>
-			({ value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } }) as any,
-	);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, { "agent.spawn": () => ({ model: "claude-haiku-4-5-20251001", agentId: "a1" }) });
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	await $.agent.spawn({
 		description: "triage the logs",
 		subagentType: "general-purpose",
@@ -1902,57 +1547,24 @@ test("a subagent that runs another turn after its box closed (a message resumed 
 });
 
 test("a run whose agents are done says which phase and how many; stopped with TaskStop, it says stopped", async ($, on) => {
-	on("process.spawn", noProbe);
 	const clock = mock.clock(on, { now: 1_000_000 });
 	const DIR = "/runs/wf_8";
 	const KEY_A = `v2:${"9".repeat(64)}`;
 	let journal = `{"type":"launched"}\n${JSON.stringify({ type: "started", key: KEY_A, agentId: "aA1", label: "lens:alpha", phase: "Review" })}\n`;
-	on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-	on("command.register", () => ({ value: undefined }) as any);
-	on("env.get", () => ({ value: "/home/t" }) as any);
-	on(
-		"fs.list",
-		($e: any, e: any) =>
-			({
-				value:
-					e.path === DIR
-						? [{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false }]
-						: [],
-			}) as any,
-	);
-	on(
-		"process.run",
-		($e: any, e: any) =>
-			({
-				value: {
-					exitCode: 0,
-					stdout: e.argv?.[0] === "cut" ? journal : "",
-					stderr: "",
-					isStdoutTruncated: false,
-					isStderrTruncated: false,
-				},
-			}) as any,
-	);
-	on("tool.call", ($e: any, e: any) =>
-		e.tool === "TaskStop"
-			? ({
-					result: { message: "Successfully stopped task: w8", task_id: "w8", task_type: "local_workflow" },
-					text: "stopped",
-				} as any)
-			: ({
-					result: { status: "async_launched", taskId: "w8", runId: "wf_8", workflowName: "review", transcriptDir: DIR },
-					text: "launched",
-				} as any),
-	);
-	on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+	answer(on, {
+		...journalAt(DIR, () => journal),
+		"tool.call": ($e: any, e: any) =>
+			e.tool === "TaskStop"
+				? {
+						result: { message: "Successfully stopped task: w8", task_id: "w8", task_type: "local_workflow" },
+						text: "stopped",
+					}
+				: launched("8", "review", DIR),
+	});
 
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	const view = await $.ui.mount(BAND);
-	const texts = async () =>
-		[
-			...(await view.findAll({ type: "Text" })).map((t) => t.text),
-			...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-		].join("\n");
+	const texts = () => textsIn(view);
 	await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 	await clock.advance(1000);
 	journal += `${JSON.stringify({ type: "result", key: KEY_A, agentId: "aA1", result: { ok: true } })}\n`;
@@ -1976,54 +1588,15 @@ test(
 	"a run that ended without a word (none of its agents running, nothing new for 10 minutes) ends and closes",
 	{ timeoutMs: 20_000 },
 	async ($, on) => {
-		on("process.spawn", noProbe);
 		const clock = mock.clock(on, { now: 1_000_000 });
 		const DIR = "/runs/wf_6";
 		const KEY_A = `v2:${"8".repeat(64)}`;
 		const journal = `{"type":"launched"}\n${JSON.stringify({ type: "started", key: KEY_A, agentId: "aA1", label: "lens:alpha", phase: "Review" })}\n${JSON.stringify({ type: "result", key: KEY_A, agentId: "aA1", result: {} })}\n`;
-		on("session.start", ($e: any, e: any) => ({ cwd: e.cwd }) as any);
-		on("command.register", () => ({ value: undefined }) as any);
-		on("env.get", () => ({ value: "/home/t" }) as any);
-		on(
-			"fs.list",
-			($e: any, e: any) =>
-				({
-					value:
-						e.path === DIR
-							? [{ name: "journal.jsonl", kind: "file", size: journal.length, mtimeMs: 0, isLink: false }]
-							: [],
-				}) as any,
-		);
-		on(
-			"process.run",
-			($e: any, e: any) =>
-				({
-					value: {
-						exitCode: 0,
-						stdout: e.argv?.[0] === "cut" ? journal : "",
-						stderr: "",
-						isStdoutTruncated: false,
-						isStderrTruncated: false,
-					},
-				}) as any,
-		);
-		on(
-			"tool.call",
-			() =>
-				({
-					result: { status: "async_launched", taskId: "w6", runId: "wf_6", workflowName: "sweep", transcriptDir: DIR },
-					text: "launched",
-				}) as any,
-		);
-		on("ui.render", () => ({ type: "engine", ref: 0 }) as any);
+		answer(on, { ...journalAt(DIR, () => journal), "tool.call": () => launched("6", "sweep", DIR) });
 
 		await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 		const view = await $.ui.mount(BAND);
-		const texts = async () =>
-			[
-				...(await view.findAll({ type: "Text" })).map((t) => t.text),
-				...(await view.findAll({ type: "Button" })).map((b) => String(b.props.label)),
-			].join("\n");
+		const texts = () => textsIn(view);
 		await $.tool.call({ tool: "Workflow", script: "export const meta = {}" } as any);
 		await clock.advance(6000);
 		expect(await texts()).toContain("Review: 1 of 1 agents done");
@@ -2033,33 +1606,8 @@ test(
 	},
 );
 
-const ran = (stdout = "") => ({
-	value: { exitCode: 0, stdout, stderr: "", isStdoutTruncated: false, isStderrTruncated: false },
-});
-const answer = (on: any, own: Record<string, (...args: any[]) => any> = {}) => {
-	const base: Record<string, (...args: any[]) => any> = {
-		"process.spawn": noProbe,
-		"session.start": ($e: any, e: any) => ({ cwd: e.cwd }),
-		"command.register": () => ({ value: undefined }),
-		"agent.spawn": ($e: any, e: any) => ({ model: "claude-haiku-4-5-20251001", agentId: e.description }),
-		"fs.list": () => ({ value: [] }),
-		"process.run": () => ran(),
-		"ui.panes": () => ({ value: [] }),
-		"ui.focus": () => ({}),
-		"ui.scroll": () => ({}),
-		"ui.render": () => ({ type: "engine", ref: 0 }),
-	};
-	for (const [noun, hook] of Object.entries({ ...base, ...own })) on(noun, hook);
-};
-const textsIn = async (view: any) =>
-	[
-		...(await view.findAll({ type: "Text" })).map((t: any) => t.text),
-		...(await view.findAll({ type: "Button" })).map((b: any) => String(b.props.label)),
-	].join("\n");
-
 test("a background shell that redraws its progress with \\r shows what it says last", async ($, on) => {
 	const clock = mock.clock(on);
-	mock.env(on, { HOME: "/home/t" });
 	answer(on, {
 		"tool.call": () => ({
 			result: { backgroundTaskId: "b1", stdout: "", stderr: "", interrupted: false },
@@ -2090,20 +1638,23 @@ test("a background shell that redraws its progress with \\r shows what it says l
 
 test("a Monitor box finds its output under CLAUDE_CODE_TMPDIR, looking again after a miss", async ($, on) => {
 	const clock = mock.clock(on);
-	mock.env(on, { HOME: "/home/t", CLAUDE_CODE_TMPDIR: "/ctmp" });
 	let isWritten = false;
-	answer(on, {
-		"tool.call": () => ({ result: { taskId: "m1" }, text: "Monitor started" }),
-		"process.run": ($e: any, e: any) => {
-			const [cmd, ...args] = e.argv as string[];
-			if (cmd === "tail") return ran("event: deploy finished\n");
-			return ran(
-				cmd === "find" && isWritten && args.includes("-H") && args.includes("/ctmp")
-					? "/ctmp/claude-1000/-tmp/s1/tasks/m1.output\n"
-					: "",
-			);
+	answer(
+		on,
+		{
+			"tool.call": () => ({ result: { taskId: "m1" }, text: "Monitor started" }),
+			"process.run": ($e: any, e: any) => {
+				const [cmd, ...args] = e.argv as string[];
+				if (cmd === "tail") return ran("event: deploy finished\n");
+				return ran(
+					cmd === "find" && isWritten && args.includes("-H") && args.includes("/ctmp")
+						? "/ctmp/claude-1000/-tmp/s1/tasks/m1.output\n"
+						: "",
+				);
+			},
 		},
-	});
+		{ HOME: "/home/t", CLAUDE_CODE_TMPDIR: "/ctmp" },
+	);
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	await $.tool.call({ tool: "Monitor", command: "tail -f deploy.log", description: "deploy" } as any);
 	await clock.advance(1300);
@@ -2116,8 +1667,7 @@ test("a Monitor box finds its output under CLAUDE_CODE_TMPDIR, looking again aft
 
 test("on the main screen the grid keeps to about half the terminal, as the fullscreen slot does", async ($, on) => {
 	const clock = mock.clock(on);
-	mock.env(on, { HOME: "/home/t" });
-	answer(on, { "tool.call": () => ({ result: { stdout: "ok", stderr: "", interrupted: false }, text: "ok" }) });
+	answer(on);
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	for (const id of ["a1", "a2", "a3", "a4", "a5", "a6"]) {
 		await $.agent.spawn({ description: id, subagentType: "general-purpose", prompt: id, background: true } as any);
@@ -2135,7 +1685,6 @@ test("on the main screen the grid keeps to about half the terminal, as the fulls
 
 test("a model id that names no family shows its last part, and leaves the title its room", async ($, on) => {
 	const clock = mock.clock(on);
-	mock.env(on, { HOME: "/home/t" });
 	answer(on, {
 		"agent.spawn": ($e: any, e: any) => ({
 			model: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3",
@@ -2156,7 +1705,6 @@ test("a model id that names no family shows its last part, and leaves the title 
 
 test("a title of wide characters is cut to the cells its box has", async ($, on) => {
 	const clock = mock.clock(on);
-	mock.env(on, { HOME: "/home/t" });
 	answer(on);
 	await $.session.start({ source: "startup", cwd: "/tmp" } as any);
 	for (const id of ["一二三四五六七八九十百千万億", "two", "three"])
