@@ -1,5 +1,5 @@
 export type GridStatus = "running" | "done" | "failed";
-/** A process under a running shell or Bash call, as the activity probe (hooks/activity.py) saw it a second ago. */
+/** A process under a running shell or Bash call, as the activity probe (hooks/activity.ts) saw it a second ago. */
 export type GridProc = {
 	pid: number;
 	/** its command line on one row, $HOME as ~; the tool's own wrapper shell goes by its name, `root` set */

@@ -82,8 +82,8 @@ export function mountTable(pid: number | "self"): Mounts {
 	for (const row of (read(`/proc/${pid}/mountinfo`) ?? "").split("\n")) {
 		if (!row) continue;
 		const at = row.indexOf(" - ");
-		const fstype = (at < 0 ? "" : row.slice(at + 3)).split(" ")[0];
-		table.set(row.split(" ")[0], REMOTE.has(fstype) || fstype.startsWith("fuse"));
+		const fstype = (at < 0 ? "" : row.slice(at + 3)).split(" ")[0] ?? "";
+		table.set(row.split(" ")[0] ?? "", REMOTE.has(fstype) || fstype.startsWith("fuse"));
 	}
 	return table;
 }
@@ -121,13 +121,13 @@ export function shellOf(argv: string[]): [string | null, string | null] {
 	argv.slice(0, -1).forEach((a, k) => {
 		if (a === "-c") c = k;
 	});
-	return c > 0 ? [argv[c - 1], argv[argv.length - 1]] : [null, null];
+	return c > 0 ? [argv[c - 1] ?? null, argv.at(-1) ?? null] : [null, null];
 }
 
 /** The command a Bash call runs, out of its shell's argv; null for any other shell (a Monitor's). */
 export function commandOf(argv: string[]): string | null {
 	const m = EVAL.exec(shellOf(argv)[1] ?? "");
-	return m ? m[1].replaceAll(`'"'"'`, "'") : null;
+	return m?.[1]?.replaceAll(`'"'"'`, "'") ?? null;
 }
 
 function tail(path: string): string[] {
@@ -149,15 +149,18 @@ function tail(path: string): string[] {
 	}
 	let lines = data.split("\n");
 	if (start > 0) {
-		const part = lines[0];
+		const part = lines[0] ?? "";
 		lines = lines.slice(1);
 		if (!lines.some((line) => line.trim()) && part.trim())
 			lines = [`…${part.slice(part.lastIndexOf("\r") + 1).slice(-300)}`];
 	}
 	const out: string[] = [];
 	for (const line of lines) {
-		const parts = line.split("\r").filter((p) => p.trim());
-		if (parts.length) out.push(parts[parts.length - 1].trimEnd());
+		const last = line
+			.split("\r")
+			.filter((p) => p.trim())
+			.at(-1);
+		if (last !== undefined) out.push(last.trimEnd());
 	}
 	return out.slice(-TAIL_LINES);
 }
@@ -207,7 +210,7 @@ export function look(pid: number, now: number, out: string | null, mounts: Mount
 		.slice(raw.lastIndexOf(")") + 2)
 		.trim()
 		.split(/\s+/);
-	const state = rest[0];
+	const state = rest[0] ?? "";
 	const ticks = Number(rest[11]) + Number(rest[12]);
 	const born = Number(rest[19]) / HZ;
 	const io = new Map<string, number>();
@@ -245,7 +248,7 @@ export function task(root: number, now: number, out: string, mounts: Mounts): Ta
 	const [top, argv, born] = look(root, now, out, mounts);
 	if (!top) return null;
 	const [shell, script] = shellOf(argv);
-	const name = basename(shell ?? argv[0]) || "sh";
+	const name = basename(shell ?? argv[0] ?? "") || "sh";
 	const wrapper = (its: string[]) =>
 		(its.length === argv.length && its.every((a, k) => a === argv[k])) ||
 		(script !== null && shellOf(its)[1] === script);

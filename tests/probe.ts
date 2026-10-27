@@ -70,7 +70,7 @@ test("a file on a mount of another namespace is not statted", () => {
 		const [files] = filesOf(process.pid, null, new Map([[mnt, true]]));
 		const held = files.filter((x) => x.path === path);
 		assert.equal(held.length, 1);
-		assert.equal(held[0].size, null);
+		assert.equal(held[0]?.size, null);
 	} finally {
 		closeSync(fd);
 		rmSync(dir, { recursive: true });
